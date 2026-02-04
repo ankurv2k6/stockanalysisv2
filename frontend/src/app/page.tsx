@@ -2,10 +2,31 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { jobsApi, companiesApi } from '@/lib/api';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Building2, FileCheck, AlertTriangle, TrendingUp } from 'lucide-react';
 import Link from 'next/link';
+import {
+  PieChart,
+  Pie,
+  Cell,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+} from 'recharts';
+
+const RISK_COLORS = {
+  high: '#ef4444',
+  medium: '#f59e0b',
+  low: '#22c55e',
+};
+
+const CATEGORY_COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#14b8a6'];
 
 function StatsCard({
   title,
@@ -53,6 +74,24 @@ export default function DashboardPage() {
 
   const isLoading = riskLoading || companiesLoading;
 
+  // Prepare pie chart data
+  const pieData = riskSummary
+    ? [
+        { name: 'High Risk', value: riskSummary.high_risk_count, color: RISK_COLORS.high },
+        { name: 'Medium Risk', value: riskSummary.medium_risk_count, color: RISK_COLORS.medium },
+        { name: 'Low Risk', value: riskSummary.low_risk_count, color: RISK_COLORS.low },
+      ]
+    : [];
+
+  // Prepare bar chart data
+  const categoryData = riskSummary?.risk_by_category
+    ? Object.entries(riskSummary.risk_by_category).map(([category, score], index) => ({
+        category: category.charAt(0).toUpperCase() + category.slice(1),
+        score: Number(score),
+        fill: CATEGORY_COLORS[index % CATEGORY_COLORS.length],
+      }))
+    : [];
+
   return (
     <div className="space-y-8">
       <div>
@@ -92,6 +131,77 @@ export default function DashboardPage() {
           description="Out of 10"
           loading={isLoading}
         />
+      </div>
+
+      {/* Charts Row */}
+      <div className="grid gap-6 md:grid-cols-2">
+        {/* Risk Distribution Pie Chart */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Risk Distribution</CardTitle>
+            <CardDescription>Companies by risk level</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <Skeleton className="h-[200px] w-full" />
+            ) : pieData.every((d) => d.value === 0) ? (
+              <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+                No analyzed companies yet
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={200}>
+                <PieChart>
+                  <Pie
+                    data={pieData}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={50}
+                    outerRadius={70}
+                    paddingAngle={5}
+                    dataKey="value"
+                  >
+                    {pieData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Risk by Category Bar Chart */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Risk by Category</CardTitle>
+            <CardDescription>Average scores across all companies</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <Skeleton className="h-[200px] w-full" />
+            ) : categoryData.length === 0 ? (
+              <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+                No risk data available
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={categoryData} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis type="number" domain={[0, 10]} />
+                  <YAxis dataKey="category" type="category" width={90} tick={{ fontSize: 12 }} />
+                  <Tooltip />
+                  <Bar dataKey="score" radius={[0, 4, 4, 0]}>
+                    {categoryData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.fill} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* Recent Companies */}
