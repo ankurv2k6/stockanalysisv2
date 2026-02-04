@@ -1,5 +1,4 @@
 import json
-import logging
 from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -12,9 +11,9 @@ from app.services.sec_fetcher import SECFetcher
 from app.services.gemini_analyzer import GeminiAnalyzer
 from app.services.risk_calculator import RiskCalculator
 from app.config import settings
+from app.logging_config import job_logger as logger
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
-logger = logging.getLogger(__name__)
 
 
 def load_sp100_tickers():
@@ -22,23 +21,33 @@ def load_sp100_tickers():
     try:
         with open("data/sp100_companies.json", "r") as f:
             data = json.load(f)
-            return data.get("companies", [])
+            tickers = data.get("companies", [])
+            logger.info("S&P 100 tickers loaded", count=len(tickers))
+            return tickers
     except Exception as e:
-        logger.error(f"Failed to load S&P 100 tickers: {e}")
+        logger.error(
+            "Failed to load S&P 100 tickers",
+            error_code="DB_CONNECTION_ERROR",
+            exception=e
+        )
         return []
 
 
 def fetch_all_task(job_id: int):
     """Background task to fetch all S&P 100 filings"""
     db = SessionLocal()
+    job = None
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
+            logger.error("Job not found", job_id=job_id)
             return
 
         job.status = "running"
         job.started_at = datetime.utcnow()
         db.commit()
+
+        logger.info("Fetch job started", job_id=job_id)
 
         fetcher = SECFetcher(settings.SEC_USER_AGENT)
         companies_data = load_sp100_tickers()
@@ -48,7 +57,11 @@ def fetch_all_task(job_id: int):
         for i, company_data in enumerate(companies_data):
             try:
                 ticker = company_data["ticker"]
-                logger.info(f"Fetching {ticker} ({i+1}/{len(companies_data)})")
+                logger.info(
+                    "Processing company",
+                    ticker=ticker,
+                    progress=f"{i+1}/{len(companies_data)}"
+                )
 
                 # Check if company exists
                 company = db.query(Company).filter(Company.ticker == ticker).first()
@@ -66,6 +79,7 @@ def fetch_all_task(job_id: int):
                         db.add(company)
                         db.commit()
                         db.refresh(company)
+                        logger.info("Company created", ticker=ticker, company_id=company.id)
 
                 if company:
                     # Check if we already have a recent filing
@@ -94,20 +108,42 @@ def fetch_all_task(job_id: int):
                             )
                             db.add(filing)
                             db.commit()
+                            logger.info(
+                                "Filing saved",
+                                ticker=ticker,
+                                filing_id=filing.id,
+                                accession_number=sections["accession_number"]
+                            )
+                    else:
+                        logger.debug("Filing already exists", ticker=ticker)
 
                 job.completed_items = i + 1
                 db.commit()
 
             except Exception as e:
-                logger.error(f"Error fetching {company_data.get('ticker', 'unknown')}: {e}")
+                logger.error(
+                    "Error processing company",
+                    exception=e,
+                    ticker=company_data.get('ticker', 'unknown')
+                )
                 continue
 
         job.status = "completed"
         job.completed_at = datetime.utcnow()
         db.commit()
+        logger.info(
+            "Fetch job completed",
+            job_id=job_id,
+            total_processed=job.completed_items
+        )
 
     except Exception as e:
-        logger.error(f"Fetch job failed: {e}")
+        logger.error(
+            "Fetch job failed",
+            error_code="DB_CONNECTION_ERROR",
+            exception=e,
+            job_id=job_id
+        )
         if job:
             job.status = "failed"
             job.error_message = str(e)
@@ -119,16 +155,25 @@ def fetch_all_task(job_id: int):
 def analyze_all_task(job_id: int):
     """Background task to analyze all pending filings"""
     db = SessionLocal()
+    job = None
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
+            logger.error("Job not found", job_id=job_id)
             return
 
         job.status = "running"
         job.started_at = datetime.utcnow()
         db.commit()
 
+        logger.info("Analyze job started", job_id=job_id)
+
         if not settings.GEMINI_API_KEY:
+            logger.error(
+                "GEMINI_API_KEY not configured",
+                error_code="GEMINI_API_ERROR",
+                job_id=job_id
+            )
             job.status = "failed"
             job.error_message = "GEMINI_API_KEY not configured"
             db.commit()
@@ -147,12 +192,19 @@ def analyze_all_task(job_id: int):
         job.total_items = len(pending_filings)
         db.commit()
 
+        logger.info("Found pending filings", count=len(pending_filings))
+
         for i, filing in enumerate(pending_filings):
             try:
-                logger.info(f"Analyzing filing {filing.id} ({i+1}/{len(pending_filings)})")
+                logger.info(
+                    "Analyzing filing",
+                    filing_id=filing.id,
+                    progress=f"{i+1}/{len(pending_filings)}"
+                )
 
                 # Parse raw content
                 if not filing.raw_content:
+                    logger.warning("Filing has no content", filing_id=filing.id)
                     continue
 
                 sections = json.loads(filing.raw_content)
@@ -160,6 +212,11 @@ def analyze_all_task(job_id: int):
                 mda = sections.get("mda", "")
 
                 if not risk_factors and not mda:
+                    logger.warning(
+                        "Filing has no analyzable content",
+                        error_code="ANALYSIS_INCOMPLETE",
+                        filing_id=filing.id
+                    )
                     filing.status = "error"
                     db.commit()
                     continue
@@ -198,8 +255,20 @@ def analyze_all_task(job_id: int):
                 job.completed_items = i + 1
                 db.commit()
 
+                logger.info(
+                    "Filing analyzed successfully",
+                    filing_id=filing.id,
+                    overall_score=risk_calculator.calculate_overall(
+                        {k: v.get("score", 5) for k, v in risk_assessment.items()}
+                    )
+                )
+
             except Exception as e:
-                logger.error(f"Error analyzing filing {filing.id}: {e}")
+                logger.error(
+                    "Error analyzing filing",
+                    exception=e,
+                    filing_id=filing.id
+                )
                 filing.status = "error"
                 db.commit()
                 continue
@@ -207,9 +276,19 @@ def analyze_all_task(job_id: int):
         job.status = "completed"
         job.completed_at = datetime.utcnow()
         db.commit()
+        logger.info(
+            "Analyze job completed",
+            job_id=job_id,
+            total_analyzed=job.completed_items
+        )
 
     except Exception as e:
-        logger.error(f"Analyze job failed: {e}")
+        logger.error(
+            "Analyze job failed",
+            error_code="DB_CONNECTION_ERROR",
+            exception=e,
+            job_id=job_id
+        )
         if job:
             job.status = "failed"
             job.error_message = str(e)
@@ -224,6 +303,7 @@ async def start_fetch_all(background_tasks: BackgroundTasks, db: Session = Depen
     # Check if there's already a running fetch job
     running_job = db.query(Job).filter(Job.job_type == "fetch", Job.status == "running").first()
     if running_job:
+        logger.warning("Fetch job already running", existing_job_id=running_job.id)
         raise HTTPException(status_code=400, detail="A fetch job is already running")
 
     # Create new job
@@ -234,6 +314,8 @@ async def start_fetch_all(background_tasks: BackgroundTasks, db: Session = Depen
 
     # Start background task
     background_tasks.add_task(fetch_all_task, job.id)
+
+    logger.info("Fetch job queued", job_id=job.id)
 
     return JobStartResponse(
         job_id=job.id,
@@ -248,6 +330,7 @@ async def start_analyze_all(background_tasks: BackgroundTasks, db: Session = Dep
     # Check if there's already a running analyze job
     running_job = db.query(Job).filter(Job.job_type == "analyze", Job.status == "running").first()
     if running_job:
+        logger.warning("Analyze job already running", existing_job_id=running_job.id)
         raise HTTPException(status_code=400, detail="An analyze job is already running")
 
     # Create new job
@@ -258,6 +341,8 @@ async def start_analyze_all(background_tasks: BackgroundTasks, db: Session = Dep
 
     # Start background task
     background_tasks.add_task(analyze_all_task, job.id)
+
+    logger.info("Analyze job queued", job_id=job.id)
 
     return JobStartResponse(
         job_id=job.id,

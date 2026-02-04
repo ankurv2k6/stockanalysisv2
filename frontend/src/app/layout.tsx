@@ -3,7 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
 import Link from "next/link";
-import { BarChart3, Building2, FileText, Settings } from "lucide-react";
+import { BarChart3, Building2, FileText, Settings, ShieldAlert } from "lucide-react";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -59,6 +59,13 @@ export default function RootLayout({
                 >
                   <FileText className="h-5 w-5" />
                   Filings
+                </Link>
+                <Link
+                  href="/risk"
+                  className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-accent transition-colors"
+                >
+                  <ShieldAlert className="h-5 w-5" />
+                  Risk Analysis
                 </Link>
                 <Link
                   href="/admin"

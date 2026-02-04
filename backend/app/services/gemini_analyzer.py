@@ -1,9 +1,8 @@
-import logging
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import google.generativeai as genai
 
-logger = logging.getLogger(__name__)
+from app.logging_config import gemini_logger as logger
 
 
 class GeminiAnalyzer:
@@ -13,16 +12,43 @@ class GeminiAnalyzer:
         """Initialize the Gemini analyzer with API key"""
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel('gemini-1.5-flash')
+        logger.info("Gemini Analyzer initialized", model="gemini-1.5-flash")
 
     def analyze(self, risk_factors: str, mda: str) -> Dict[str, Any]:
         """Analyze SEC filing content and return structured analysis"""
         prompt = self._build_prompt(risk_factors, mda)
 
+        logger.info(
+            "Starting analysis",
+            risk_factors_len=len(risk_factors),
+            mda_len=len(mda)
+        )
+
         try:
             response = self.model.generate_content(prompt)
-            return self._parse_response(response.text)
+            result = self._parse_response(response.text)
+            logger.info(
+                "Analysis completed",
+                summary_len=len(result.get("summary", "")),
+                categories=list(result.get("risk_assessment", {}).keys())
+            )
+            return result
+        except ValueError as e:
+            # Re-raise ValueError (parse errors) as-is
+            raise
         except Exception as e:
-            logger.error(f"Gemini analysis failed: {e}")
+            if "rate" in str(e).lower() or "429" in str(e) or "quota" in str(e).lower():
+                logger.error(
+                    "Gemini rate limit exceeded",
+                    error_code="GEMINI_RATE_LIMIT",
+                    exception=e
+                )
+            else:
+                logger.error(
+                    "Gemini API error",
+                    error_code="GEMINI_API_ERROR",
+                    exception=e
+                )
             raise ValueError(f"GEMINI_API_ERROR: {str(e)}")
 
     def _build_prompt(self, risk_factors: str, mda: str) -> str:
@@ -79,8 +105,9 @@ IMPORTANT: Return ONLY valid JSON, no markdown formatting or extra text.
     def _parse_response(self, text: str) -> Dict[str, Any]:
         """Parse JSON from Gemini response"""
         try:
+            logger.debug("Parsing Gemini response", response_len=len(text))
+
             # Try to extract JSON from the response
-            # Handle cases where response might have markdown code blocks
             cleaned = text.strip()
 
             # Remove markdown code blocks if present
@@ -99,6 +126,11 @@ IMPORTANT: Return ONLY valid JSON, no markdown formatting or extra text.
             end = cleaned.rfind('}') + 1
 
             if start == -1 or end == 0:
+                logger.error(
+                    "No JSON object found in response",
+                    error_code="GEMINI_PARSE_ERROR",
+                    response_preview=text[:200]
+                )
                 raise ValueError("No JSON object found in response")
 
             json_str = cleaned[start:end]
@@ -106,16 +138,22 @@ IMPORTANT: Return ONLY valid JSON, no markdown formatting or extra text.
 
             # Validate required fields
             if "summary" not in result:
+                logger.warning("Summary missing from response, using default")
                 result["summary"] = "Analysis summary not available."
 
             if "risk_assessment" not in result:
+                logger.warning("Risk assessment missing from response, using default")
                 result["risk_assessment"] = self._default_risk_assessment()
 
             return result
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Gemini response: {e}")
-            logger.debug(f"Response text: {text[:500]}")
+            logger.error(
+                "Failed to parse Gemini JSON response",
+                error_code="GEMINI_PARSE_ERROR",
+                exception=e,
+                response_preview=text[:300]
+            )
             raise ValueError(f"GEMINI_PARSE_ERROR: {str(e)}")
 
     def _default_risk_assessment(self) -> Dict[str, Any]:
